@@ -1,0 +1,115 @@
+<?php
+// Functions to generate VPN configuration and handle downloads
+function generate_vpn_config($accountNumber) {
+    $url = 'https://de1.incognito.guru:5000/generate'; // Flask server URL
+    $data = json_encode(array('accountNumber' => $accountNumber));
+    $options = array(
+        'http' => array(
+            'header'  => "Content-Type: application/json\r\n",
+            'method'  => 'POST',
+            'content' => $data,
+        ),
+    );
+    $context  = stream_context_create($options);
+    error_log('Sending request to Flask server: ' . $url . ' with data: ' . $data);
+    $result = file_get_contents($url, false, $context);
+    if ($result === FALSE) {
+        $error = error_get_last();
+        error_log('Error contacting Flask server: ' . print_r($error, true));
+        return new WP_Error('generate_vpn_config_error', 'Could not generate VPN configuration: ' . $error['message']);
+    }
+    error_log('Received response from Flask server: ' . $result);
+    $decoded = json_decode($result, true);
+    if (!$decoded || !isset($decoded['downloadUrl'])) {
+        error_log('Invalid or incomplete response from Flask server');
+        return new WP_Error('generate_vpn_config_error', 'Invalid response from VPN server');
+    }
+    return $decoded;
+}
+
+function generate_account_number() {
+    error_log('generate_account_number function called');
+    error_log('POST data: ' . print_r($_POST, true));
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        $accountNumber = mt_rand(1000000000000000, 9999999999999999);
+        $vpnConfig = generate_vpn_config(strval($accountNumber));
+        if (is_wp_error($vpnConfig)) {
+            wp_send_json_error($vpnConfig->get_error_message());
+        } else {
+            wp_send_json_success($vpnConfig);
+        }
+        exit;
+    }
+}
+
+add_action('wp_ajax_generate_account_number', 'generate_account_number');
+add_action('wp_ajax_nopriv_generate_account_number', 'generate_account_number');
+
+// Add HTML form and JavaScript via shortcode
+function vpn_form_shortcode() {
+    ob_start();
+    ?>
+    <form id="vpnForm">
+        <button type="button" id="generateAccountButton">Create Account Number</button>
+    </form>
+    <div id="accountInfo" style="display:none;">
+        <p>Account Number: <span id="generatedAccountNumber"></span></p>
+        <a id="downloadLink" href="#" style="display:none;">Download VPN Configuration</a>
+    </div>
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        var generateButton = document.getElementById('generateAccountButton');
+        console.log('Script loaded, looking for button...');
+        if (generateButton) {
+            console.log('Generate button found');
+            generateButton.addEventListener('click', function() {
+                console.log('Button clicked');
+                fetch('<?php echo admin_url('admin-ajax.php'); ?>', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: new URLSearchParams({
+                        action: 'generate_account_number'
+                    })
+                })
+                .then(response => {
+                    console.log('Response received:', response);
+                    if (!response.ok) {
+                        return response.text().then(text => { throw new Error(text) });
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    console.log('Data received:', data);
+                    if (data.success && data.data.accountNumber && data.data.downloadUrl) {
+                        console.log('Account number generated:', data.data.accountNumber);
+                        document.getElementById('generatedAccountNumber').innerText = data.data.accountNumber;
+                        document.getElementById('accountInfo').style.display = 'block';
+                        
+                        var downloadLink = document.getElementById('downloadLink');
+                        if (downloadLink) {
+                            downloadLink.href = data.data.downloadUrl;
+                            downloadLink.style.display = 'inline-block';
+                        } else {
+                            console.error('Download link element not found');
+                        }
+                    } else {
+                        throw new Error(data.data || 'Unexpected data format from server');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    alert('An error occurred: ' + error.message);
+                });
+            });
+        } else {
+            console.error('Generate button not found');
+        }
+    });
+    </script>
+    <?php
+    return ob_get_clean();
+}
+add_shortcode('vpn_form', 'vpn_form_shortcode');
+?>
