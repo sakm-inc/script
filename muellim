@@ -1,0 +1,160 @@
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ParseMode
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ConversationHandler,
+    filters,
+    CallbackContext
+)
+
+# States for conversation
+NUMBER_OF_EVALUATIONS, GET_RESULTS, CHECKBOX, GET_BSQ, CALCULATE = range(5)
+
+async def start(update: Update, context: CallbackContext) -> int:
+    keyboard = [
+        [InlineKeyboardButton("Yarımillik qiymətləndirmə", callback_data='yarimillik')],
+        [InlineKeyboardButton("İllik qiymətləndirmə", callback_data='illik')],
+        [InlineKeyboardButton("Sual sayına görə bal", callback_data='sual_sayi')],
+        [InlineKeyboardButton("Keyfiyyət və müvəffəqiyyət faizi", callback_data='faiz')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "Zəhmət olmasa muvafiq seçimi edin. Seçiminizə uygun hesablama aparılacaq:",
+        reply_markup=reply_markup
+    )
+    return NUMBER_OF_EVALUATIONS
+
+async def option_selected(update: Update, context: CallbackContext) -> int:
+    query = update.callback_query
+    await query.answer()
+    selected_option = query.data
+    context.user_data['selected_option'] = selected_option
+
+    if selected_option == 'yarimillik':
+        await query.edit_message_text(
+            "Yarımillik dövrdə neçə kiçik summativ qiymətləndirmə aparılıb? \n"
+            "<b>(Yarımil ərzində kiçik summativ sayı 3-dən az 6-dan çox ola bilməz)</b>",
+            parse_mode=ParseMode.HTML
+        )
+        return NUMBER_OF_EVALUATIONS
+    elif selected_option == 'illik':
+        await query.edit_message_text("Illik hesablama hələlik dəstəklənmir.")
+    elif selected_option == 'sual_sayi':
+        await query.edit_message_text("Sual sayi hesablama hələlik dəstəklənmir.")
+    elif selected_option == 'faiz':
+        await query.edit_message_text("Faiz hesablama hələlik dəstəklənmir.")
+    return ConversationHandler.END
+
+async def number_of_evaluations(update: Update, context: CallbackContext) -> int:
+    try:
+        evaluations = int(update.message.text)
+        if 3 <= evaluations <= 6:
+            context.user_data['evaluations'] = evaluations
+            context.user_data['results'] = []
+            await update.message.reply_text(f"Zəhmət olmasa, 1-ci qiymətləndirmənin nəticəsini daxil edin:")
+            return GET_RESULTS
+        else:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "Xəta: Zəhmət olmasa yalnız 3-dən 6-ya qədər olan rəqəmləri daxil edin. Mətn və ya şəkil kimi digər məlumatları göndərmək mümkün deyil."
+        )
+        return NUMBER_OF_EVALUATIONS
+
+async def get_results(update: Update, context: CallbackContext) -> int:
+    try:
+        result = float(update.message.text)
+        if 0 <= result <= 100:
+            results = context.user_data['results']
+            results.append(result)
+            evaluations = context.user_data['evaluations']
+            if len(results) < evaluations:
+                await update.message.reply_text(f"Zəhmət olmasa, {len(results) + 1}-ci qiymətləndirmənin nəticəsini daxil edin:")
+                return GET_RESULTS
+            else:
+                keyboard = [
+                    [InlineKeyboardButton("Bəli", callback_data='yes'), InlineKeyboardButton("Xeyr", callback_data='no')]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await update.message.reply_text(
+                    "Yarımillik dövrdə böyük summativ qiymətləndirmə (BSQ) aparılıb?",
+                    reply_markup=reply_markup
+                )
+                return CHECKBOX
+        else:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "Xəta: Zəhmət olmasa yalnız 0-dan 100-ə qədər olan rəqəmləri daxil edin. Mətn və ya şəkil kimi digər məlumatları göndərmək mümkün deyil."
+        )
+        return GET_RESULTS
+
+async def checkbox(update: Update, context: CallbackContext) -> int:
+    query = update.callback_query
+    await query.answer()
+    context.user_data['large_summative'] = query.data == 'yes'
+
+    if context.user_data['large_summative']:
+        await query.edit_message_text("Zəhmət olmasa, BSQ-nin nəticəsini daxil edin:")
+        return GET_BSQ
+    else:
+        return await calculate(update, context)
+
+async def get_bsq(update: Update, context: CallbackContext) -> int:
+    try:
+        bsq = float(update.message.text)
+        if 0 <= bsq <= 100:
+            context.user_data['bsq'] = bsq
+            return await calculate(update, context)
+        else:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "Xəta: Zəhmət olmasa yalnız 0-dan 100-ə qədər olan rəqəmləri daxil edin. Mətn və ya şəkil kimi digər məlumatları göndərmək mümkün deyil."
+        )
+        return GET_BSQ
+
+async def calculate(update: Update, context: CallbackContext) -> int:
+    results = context.user_data['results']
+    large_summative = context.user_data['large_summative']
+    evaluations = context.user_data['evaluations']
+    midterm_score = sum(results) / evaluations
+    if large_summative:
+        bsq = context.user_data['bsq']
+        final_score = midterm_score * 0.4 + bsq * 0.6
+    else:
+        final_score = midterm_score
+    
+    message = update.message if update.message else update.callback_query.message
+    await message.reply_text(f"Yarımillik balın nəticəsi: {final_score:.2f} ({final_score:.2f}%)\n\nYenidən başlamaq üçün /start düyməsinə basın.")
+    return ConversationHandler.END
+
+async def error_message(update: Update, context: CallbackContext) -> int:
+    await update.message.reply_text(
+        "Xəta: Zəhmət olmasa yuxarıdakı sauala cavab verin."
+    )
+    return CHECKBOX
+
+def main():
+    application = ApplicationBuilder().token("7454812584:AAFsIGs2l7nyoD2H34WhW9S88erfzuH15ho").build()
+
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('start', start)],
+        states={
+            NUMBER_OF_EVALUATIONS: [MessageHandler(filters.TEXT & ~filters.COMMAND, number_of_evaluations)],
+            GET_RESULTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_results)],
+            CHECKBOX: [CallbackQueryHandler(checkbox), MessageHandler(filters.TEXT & ~filters.COMMAND, error_message)],
+            GET_BSQ: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_bsq)],
+        },
+        fallbacks=[CommandHandler('start', start)],
+    )
+
+    application.add_handler(conv_handler)
+    application.add_handler(CallbackQueryHandler(option_selected, pattern='^(yarimillik|illik|sual_sayi|faiz)$'))
+    application.run_polling()
+
+if __name__ == '__main__':
+    main()
